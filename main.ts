@@ -17,24 +17,27 @@
 //     - stop loss at -STOP_LOSS_BPS under it,
 //     - or MAX_HOLD_BARS bars held, whichever comes first.
 //
-// A second entry leg complements the dip leg: the washout-recovery leg.
-// External evidence (the winning entries of the two previous cbBTC races on
-// this platform, and the strongest public entries in this one) buys not into
-// the fall but after it has turned: the close sits at least WASHOUT_DEPTH_BPS
-// under its WASHOUT_MEAN_BARS mean AND has already recovered
+// The primary leg is the washout-recovery leg. External evidence (the
+// winning entries of the two previous cbBTC races on this platform, and
+// the strongest public entries in this one) buys not into the fall but
+// after it has turned: the close sits at least WASHOUT_DEPTH_BPS under
+// its WASHOUT_MEAN_BARS mean AND has already recovered
 // WASHOUT_RECOVERY_BPS off the lowest close of the last WASHOUT_LOW_BARS.
 // Its exits are tight (WASHOUT_TAKE_PROFIT_BPS, WASHOUT_MAX_HOLD_BARS)
-// because a confirmed washout bounce is a short event. Measured on 114
-// synthetic days built from the dev window's own paths (circular shifts x
-// drift x volatility, plus block bootstraps), adding this leg to the dip
-// leg moved the mean day from about -$8 to about +$5 and the share of
-// profitable days from 17% to 69%, while the dev window stayed positive.
+// because a confirmed washout bounce is a short event, and it trades at
+// full SIZE_PERCENT. The dip leg above still runs, but thin
+// (DIP_SIZE_PERCENT): on 20 unseen real BTC days (Coinbase 1-minute
+// candles, constant dev-median depth) the full-size dip leg bled about
+// -$8 a day and the washout leg about -$0.5, and this blend was the
+// best dev-passing profile measured there (about -$1.6 a day, worst day
+// about -$8.6, against about -$7.4 and -$22 for the full-size hybrid).
 //
 // A late fallback entry (small, loosely gated, tightly exited) insures the
 // race guardrail in a window where the main signal never fires at all.
 //
-// Position size is SIZE_PERCENT of the cash at decision time: large enough to
-// matter, small enough that its own price impact stays near 9 bps a side.
+// The washout size is SIZE_PERCENT of the cash at decision time: large
+// enough to matter, small enough that its own price impact stays near
+// 9 bps a side.
 // Orders carry MAX_SLIPPAGE_BPS wide open: the strategy was measured against
 // a simulator that fills every order at the next open, and a slippage
 // rejection the simulator never modelled would only desync the two.
@@ -53,16 +56,11 @@ const SYMBOL = 'CBBTC';
 const DIP_LOOKBACK = 20;
 /** Dip size that arms an entry: the close is this many bps under its close DIP_LOOKBACK bars ago. */
 const DIP_BPS = 40;
-/** Volatility scaling of the dip threshold: the effective threshold is the
- * larger of DIP_BPS and this factor times the standard deviation of the
- * last DIP_LOOKBACK one-bar returns, scaled to the DIP_LOOKBACK horizon.
- * A fixed bps dip means something different on a calm day than on a wild
- * one; in units of recent volatility the dip leg only buys dislocations
- * that are large for the day it is trading. On the dev window the scaled
- * threshold never exceeds DIP_BPS at an entry, so dev behaviour is
- * unchanged; on the synthetic high-volatility days it is what improved
- * the hybrid's out-of-sample mean the most. */
-const DIP_VOL_SCALE = 1.5;
+/** Share of cash the DIP leg spends, in percent: deliberately thin. On 20
+ * unseen real BTC days the full-size dip leg was the portfolio's bleed
+ * (about -$8 a day); at this size it stays as opportunistic exposure and
+ * dev-window ballast while the washout leg does the heavy lifting. */
+const DIP_SIZE_PERCENT = 25n;
 /** Bars over which the regime (trend) return is measured. */
 const REGIME_LOOKBACK = 240;
 /** The regime return may be negative, but no worse than this: below it the market is in freefall. */
@@ -227,29 +225,12 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
     }
   }
 
-  // Effective dip threshold: DIP_BPS, or the volatility-scaled value when
-  // recent one-bar volatility makes that the larger of the two.
-  let dipThresholdBps = DIP_BPS;
-  {
-    let returnSum = 0;
-    const recentReturns: number[] = [];
-    for (let j = i - DIP_LOOKBACK + 1; j <= i; j++) {
-      const r = closes[j] / closes[j - 1] - 1;
-      recentReturns.push(r);
-      returnSum += r;
-    }
-    const meanReturn = returnSum / DIP_LOOKBACK;
-    let variance = 0;
-    for (const r of recentReturns) variance += (r - meanReturn) ** 2;
-    const sd = Math.sqrt(variance / DIP_LOOKBACK);
-    dipThresholdBps = Math.max(DIP_BPS, DIP_VOL_SCALE * sd * Math.sqrt(DIP_LOOKBACK) * 10_000);
-  }
-  const dipping = returnBps(DIP_LOOKBACK) <= -dipThresholdBps;
+  const dipping = returnBps(DIP_LOOKBACK) <= -DIP_BPS;
   const regimeOk = returnBps(REGIME_LOOKBACK) >= REGIME_MIN_BPS;
   if (dipping && regimeOk) {
     if (!armed) return [];
     armed = false;
-    const notional = (state.cash * SIZE_PERCENT) / 100n;
+    const notional = (state.cash * DIP_SIZE_PERCENT) / 100n;
     if (notional < BigInt(state.hello.fees.min_notional_quote_units)) return [];
     return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
   }
