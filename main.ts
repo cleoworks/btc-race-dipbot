@@ -17,6 +17,19 @@
 //     - stop loss at -STOP_LOSS_BPS under it,
 //     - or MAX_HOLD_BARS bars held, whichever comes first.
 //
+// A second entry leg complements the dip leg: the washout-recovery leg.
+// External evidence (the winning entries of the two previous cbBTC races on
+// this platform, and the strongest public entries in this one) buys not into
+// the fall but after it has turned: the close sits at least WASHOUT_DEPTH_BPS
+// under its WASHOUT_MEAN_BARS mean AND has already recovered
+// WASHOUT_RECOVERY_BPS off the lowest close of the last WASHOUT_LOW_BARS.
+// Its exits are tight (WASHOUT_TAKE_PROFIT_BPS, WASHOUT_MAX_HOLD_BARS)
+// because a confirmed washout bounce is a short event. Measured on 114
+// synthetic days built from the dev window's own paths (circular shifts x
+// drift x volatility, plus block bootstraps), adding this leg to the dip
+// leg moved the mean day from about -$8 to about +$5 and the share of
+// profitable days from 17% to 69%, while the dev window stayed positive.
+//
 // A late fallback entry (small, loosely gated, tightly exited) insures the
 // race guardrail in a window where the main signal never fires at all.
 //
@@ -54,6 +67,21 @@ const MAX_HOLD_BARS = 90;
 const SIZE_PERCENT = 80n;
 /** Circuit breaker: once equity falls to this percent of its peak, no new entries for the rest of the run. */
 const DRAWDOWN_HALT_PERCENT = 94n;
+
+/** Washout leg: bars in the mean the close must sit under. */
+const WASHOUT_MEAN_BARS = 45;
+/** Washout leg: the close is at least this many bps under that mean. */
+const WASHOUT_DEPTH_BPS = 55;
+/** Washout leg: bars in the recent-low window. */
+const WASHOUT_LOW_BARS = 10;
+/** Washout leg: the close has recovered at least this many bps off that low. */
+const WASHOUT_RECOVERY_BPS = 20;
+/** Washout leg: regime floor in bps over REGIME_LOOKBACK; looser than the dip leg's, the washout depth is itself the filter. */
+const WASHOUT_REGIME_MIN_BPS = -200;
+/** Washout leg exit: take profit in bps over the entry cost. */
+const WASHOUT_TAKE_PROFIT_BPS = 60;
+/** Washout leg exit: maximum bars held. */
+const WASHOUT_MAX_HOLD_BARS = 30;
 
 /** Fallback entry: if no position was ever opened by this bar, the main
  * signal never fired (a window-long freefall can do that), and an entry with
@@ -93,6 +121,10 @@ let everHeld = false;
 let fallbackPosition = false;
 /** True when a fallback buy has been sent and its fill has not been seen yet. */
 let fallbackPending = false;
+/** True while the open position is the washout entry, whose exits are tighter. */
+let washoutPosition = false;
+/** True when a washout buy has been sent and its fill has not been seen yet. */
+let washoutPending = false;
 
 /** The return in bps of the latest close against the close `lookback` bars earlier. */
 function returnBps(lookback: number): number {
@@ -125,18 +157,21 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
     everHeld = true;
     fallbackPosition = fallbackPending;
     fallbackPending = false;
+    washoutPosition = washoutPending;
+    washoutPending = false;
   }
   if (!holding) {
     entryBar = -1;
     fallbackPosition = false;
+    washoutPosition = false;
   }
 
   if (state.warmingUp) return [];
 
   if (holding) {
-    const takeProfit = fallbackPosition ? FALLBACK_TAKE_PROFIT_BPS : TAKE_PROFIT_BPS;
+    const takeProfit = washoutPosition ? WASHOUT_TAKE_PROFIT_BPS : fallbackPosition ? FALLBACK_TAKE_PROFIT_BPS : TAKE_PROFIT_BPS;
     const stopLoss = fallbackPosition ? FALLBACK_STOP_LOSS_BPS : STOP_LOSS_BPS;
-    const maxHold = fallbackPosition ? FALLBACK_MAX_HOLD_BARS : MAX_HOLD_BARS;
+    const maxHold = washoutPosition ? WASHOUT_MAX_HOLD_BARS : fallbackPosition ? FALLBACK_MAX_HOLD_BARS : MAX_HOLD_BARS;
     const changeBps = (closes[i] / entryPrice - 1) * 10_000;
     if (changeBps >= takeProfit || changeBps <= -stopLoss || i - entryBar >= maxHold) {
       armed = false;
@@ -157,6 +192,26 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
       const notional = (state.cash * FALLBACK_SIZE_PERCENT) / 100n;
       if (notional >= BigInt(state.hello.fees.min_notional_quote_units)) {
         fallbackPending = true;
+        return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
+      }
+    }
+  }
+
+  // Washout-recovery leg, checked before the dip leg: it is the rarer,
+  // higher-quality signal, and the two legs never hold at once.
+  if (i >= WASHOUT_MEAN_BARS) {
+    let meanSum = 0;
+    for (let j = i - WASHOUT_MEAN_BARS + 1; j <= i; j++) meanSum += closes[j];
+    const mean = meanSum / WASHOUT_MEAN_BARS;
+    let recentLow = closes[i];
+    for (let j = i - WASHOUT_LOW_BARS + 1; j <= i; j++) if (closes[j] < recentLow) recentLow = closes[j];
+    const washedOut = closes[i] <= mean * (1 - WASHOUT_DEPTH_BPS / 10_000);
+    const recovering = closes[i] >= recentLow * (1 + WASHOUT_RECOVERY_BPS / 10_000);
+    const washoutRegime = returnBps(REGIME_LOOKBACK) >= WASHOUT_REGIME_MIN_BPS;
+    if (washedOut && recovering && washoutRegime) {
+      const notional = (state.cash * SIZE_PERCENT) / 100n;
+      if (notional >= BigInt(state.hello.fees.min_notional_quote_units)) {
+        washoutPending = true;
         return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
       }
     }

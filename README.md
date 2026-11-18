@@ -11,6 +11,15 @@ a +120 bps take profit, a -80 bps stop, or after 90 bars. On the kit's dev
 window every house baseline loses money; this strategy was chosen from a
 parameter sweep for a profitable plateau, not a single optimum.
 
+A second leg adds washout recovery, the pattern behind the winning entries
+of the two previous cbBTC races: when the close sits at least 55 bps under
+its 45-bar mean and has already recovered 20 bps off the lowest close of
+the last 10 bars, the bot buys (same 80% size) and exits at +60 bps, the
+same -80 bps stop, or after 30 bars. The two legs never hold at once. On
+114 synthetic days rebuilt from the dev window's own paths, the combined
+bot averaged about +$5 a day with 69% profitable days, against about -$8
+and 17% for the dip leg alone; on the dev window itself it nets +$3.18.
+
 ## Run it
 
 ```sh
