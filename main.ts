@@ -53,6 +53,16 @@ const SYMBOL = 'CBBTC';
 const DIP_LOOKBACK = 20;
 /** Dip size that arms an entry: the close is this many bps under its close DIP_LOOKBACK bars ago. */
 const DIP_BPS = 40;
+/** Volatility scaling of the dip threshold: the effective threshold is the
+ * larger of DIP_BPS and this factor times the standard deviation of the
+ * last DIP_LOOKBACK one-bar returns, scaled to the DIP_LOOKBACK horizon.
+ * A fixed bps dip means something different on a calm day than on a wild
+ * one; in units of recent volatility the dip leg only buys dislocations
+ * that are large for the day it is trading. On the dev window the scaled
+ * threshold never exceeds DIP_BPS at an entry, so dev behaviour is
+ * unchanged; on the synthetic high-volatility days it is what improved
+ * the hybrid's out-of-sample mean the most. */
+const DIP_VOL_SCALE = 1.5;
 /** Bars over which the regime (trend) return is measured. */
 const REGIME_LOOKBACK = 240;
 /** The regime return may be negative, but no worse than this: below it the market is in freefall. */
@@ -217,7 +227,24 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
     }
   }
 
-  const dipping = returnBps(DIP_LOOKBACK) <= -DIP_BPS;
+  // Effective dip threshold: DIP_BPS, or the volatility-scaled value when
+  // recent one-bar volatility makes that the larger of the two.
+  let dipThresholdBps = DIP_BPS;
+  {
+    let returnSum = 0;
+    const recentReturns: number[] = [];
+    for (let j = i - DIP_LOOKBACK + 1; j <= i; j++) {
+      const r = closes[j] / closes[j - 1] - 1;
+      recentReturns.push(r);
+      returnSum += r;
+    }
+    const meanReturn = returnSum / DIP_LOOKBACK;
+    let variance = 0;
+    for (const r of recentReturns) variance += (r - meanReturn) ** 2;
+    const sd = Math.sqrt(variance / DIP_LOOKBACK);
+    dipThresholdBps = Math.max(DIP_BPS, DIP_VOL_SCALE * sd * Math.sqrt(DIP_LOOKBACK) * 10_000);
+  }
+  const dipping = returnBps(DIP_LOOKBACK) <= -dipThresholdBps;
   const regimeOk = returnBps(REGIME_LOOKBACK) >= REGIME_MIN_BPS;
   if (dipping && regimeOk) {
     if (!armed) return [];

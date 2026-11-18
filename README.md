@@ -19,6 +19,11 @@ same -80 bps stop, or after 30 bars. The two legs never hold at once. On
 114 synthetic days rebuilt from the dev window's own paths, the combined
 bot averaged about +$5 a day with 69% profitable days, against about -$8
 and 17% for the dip leg alone; on the dev window itself it nets +$3.18.
+The dip leg's threshold is also volatility-scaled (at least 40 bps, or
+1.5x the recent 20-bar volatility over the dip horizon when that is
+larger), which on the full 228-day synthetic suite lifted the combined
+bot further, to about +$9 a day with 79% profitable days, without
+changing a single dev-window trade.
 
 ## Run it
 
